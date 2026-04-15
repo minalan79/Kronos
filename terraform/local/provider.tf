@@ -17,7 +17,7 @@ terraform {
     organization = "Vervea"
 
     workspaces {
-      name = "kronos-kubernetes"
+      name = "state-kronos"
     }
   }
 }
