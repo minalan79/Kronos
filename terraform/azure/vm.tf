@@ -14,4 +14,5 @@ resource "azurerm_linux_virtual_machine" "vm_ea_kronos" {
     version   = "latest"
     }
     size = "Standard_F2"
+    admin_username = "ubuntu_user"
 }
