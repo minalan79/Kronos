@@ -1,6 +1,6 @@
 terraform {
   required_providers {
-    azurerm = {
+    aws = {
       source  = "hashicorp/aws"
       version = "=6.40.0"
     }
@@ -15,6 +15,8 @@ terraform {
 }
 
 provider "aws" {
-    alias = "us-east-1"
     region = "us-east-1"
+}
+
+data "aws_availability_zones" "az_ue" {
 }

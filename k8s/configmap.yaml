@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kronos-app-config
+  namespace: kronos
+data:
+  APP_ENV: "production"
+  LOG_LEVEL: "info"
+  WORKERS: "4"

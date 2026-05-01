@@ -18,6 +18,7 @@ resource "aws_iam_role" "role_eks_vervea" {
 }
 
 resource "aws_iam_role_policy_attachment" "attachment_eks_vervea_role" {
-  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy"
+  for_each = toset(["AmazonEKSClusterPolicy", "AmazonEKSBlockStoragePolicy", "AmazonEKSComputePolicy", "AmazonEKSLoadBalancingPolicy", "AmazonEKSNetworkingPolicy"])
+  policy_arn = "arn:aws:iam::aws:policy/${each.value}"
   role       = aws_iam_role.role_eks_vervea.name
 }

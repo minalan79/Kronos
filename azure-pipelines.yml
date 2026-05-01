@@ -1,19 +1,219 @@
-# Starter pipeline
-# Start with a minimal pipeline that you can customize to build and deploy your code.
-# Add steps that build, run tests, deploy, and more:
-# https://aka.ms/yaml
-
 trigger:
-- main
+  - main
 
-# pool:
-#   vmImage: ubuntu-latest
+pr:
+  - main
 
-steps:
-- script: echo Hello, world!
-  displayName: 'Run a one-line script'
+pool:
+  vmImage: 'ubuntu-latest'
 
-- script: |
-    echo Add other tasks to build, test, and deploy your project.
-    echo See https://aka.ms/yaml
-  displayName: 'Run a multi-line script'
+variables:
+  dockerRegistryServiceConnection: 'kronos-acr'
+  imageRepository: 'kronos'
+  containerRegistry: '$(acrLoginServer)'
+  dockerfilePath: '$(Build.SourcesDirectory)/Dockerfile'
+  tag: '$(Build.BuildId)'
+  terraformVersion: '1.5.0'
+
+stages:
+  - stage: Build
+    displayName: 'Build and Push Docker Image'
+    jobs:
+      - job: BuildImage
+        displayName: 'Build and Push Image'
+        steps:
+          - task: UseDotNet@2
+            displayName: 'Install .NET (for tools)'
+            inputs:
+              version: '7.x'
+
+          - task: Docker@2
+            displayName: 'Build Docker Image'
+            inputs:
+              command: build
+              repository: $(imageRepository)
+              dockerfile: $(dockerfilePath)
+              containerRegistryType: 'Azure Container Registry'
+              azureSubscriptionEndpoint: $(dockerRegistryServiceConnection)
+              azureContainerRegistry: $(containerRegistry)
+              tags: |
+                $(tag)
+                latest
+
+          - task: Docker@2
+            displayName: 'Push Docker Image to ACR'
+            inputs:
+              command: push
+              repository: $(imageRepository)
+              containerRegistryType: 'Azure Container Registry'
+              azureSubscriptionEndpoint: $(dockerRegistryServiceConnection)
+              azureContainerRegistry: $(containerRegistry)
+              tags: |
+                $(tag)
+                latest
+
+  - stage: Terraform
+    displayName: 'Terraform Plan & Apply'
+    dependsOn: []  # Run in parallel with Build if desired
+    jobs:
+      - job: TerraformPlan
+        displayName: 'Terraform Plan'
+        steps:
+          - checkout: self
+
+          - task: TerraformInstaller@0
+            displayName: 'Install Terraform'
+            inputs:
+              terraformVersion: $(terraformVersion)
+
+          - task: TerraformTaskV3@3
+            displayName: 'Terraform Init'
+            inputs:
+              provider: 'azurerm'
+              command: 'init'
+              workingDirectory: '$(Build.SourcesDirectory)/terraform/azure'
+              backendServiceArm: 'azure-subscription'  # Update with your service connection name
+              backendAzureRmResourceGroupName: 'rg-terraform-state'
+              backendAzureRmStorageAccountName: 'tfstateaccount'
+              backendAzureRmContainerName: 'tfstate'
+              backendAzureRmKey: 'kronos.tfstate'
+
+          - task: TerraformTaskV3@3
+            displayName: 'Terraform Validate'
+            inputs:
+              provider: 'azurerm'
+              command: 'validate'
+              workingDirectory: '$(Build.SourcesDirectory)/terraform/azure'
+
+          - task: TerraformTaskV3@3
+            displayName: 'Terraform Plan'
+            inputs:
+              provider: 'azurerm'
+              command: 'plan'
+              workingDirectory: '$(Build.SourcesDirectory)/terraform/azure'
+              environmentServiceNameAzureRM: 'azure-subscription'  # Update with your service connection name
+              commandOptions: '-out=$(Build.ArtifactStagingDirectory)/tfplan'
+
+          - task: PublishBuildArtifacts@1
+            displayName: 'Publish Terraform Plan'
+            inputs:
+              PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+              ArtifactName: 'terraform-plan'
+
+      - job: TerraformApply
+        displayName: 'Terraform Apply'
+        dependsOn: TerraformPlan
+        condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+        steps:
+          - checkout: self
+
+          - task: DownloadBuildArtifacts@0
+            displayName: 'Download Terraform Plan'
+            inputs:
+              artifactName: 'terraform-plan'
+              downloadPath: '$(System.DefaultWorkingDirectory)'
+
+          - task: TerraformInstaller@0
+            displayName: 'Install Terraform'
+            inputs:
+              terraformVersion: $(terraformVersion)
+
+          - task: TerraformTaskV3@3
+            displayName: 'Terraform Init'
+            inputs:
+              provider: 'azurerm'
+              command: 'init'
+              workingDirectory: '$(Build.SourcesDirectory)/terraform/azure'
+              backendServiceArm: 'azure-subscription'
+              backendAzureRmResourceGroupName: 'rg-terraform-state'
+              backendAzureRmStorageAccountName: 'tfstateaccount'
+              backendAzureRmContainerName: 'tfstate'
+              backendAzureRmKey: 'kronos.tfstate'
+
+          - task: TerraformTaskV3@3
+            displayName: 'Terraform Apply'
+            inputs:
+              provider: 'azurerm'
+              command: 'apply'
+              workingDirectory: '$(Build.SourcesDirectory)/terraform/azure'
+              environmentServiceNameAzureRM: 'azure-subscription'
+              commandOptions: '$(System.DefaultWorkingDirectory)/terraform-plan/tfplan'
+
+  - stage: Deploy
+    displayName: 'Deploy to AKS'
+    dependsOn: 
+      - Build
+      - Terraform
+    condition: succeeded()
+    jobs:
+      - job: DeployToAKS
+        displayName: 'Deploy App to AKS'
+        steps:
+          - checkout: self
+
+          - task: AzureCLI@2
+            displayName: 'Get AKS Credentials'
+            inputs:
+              azureSubscription: 'azure-subscription'  # Update with your service connection name
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                az aks get-credentials \
+                  --resource-group rg-ea-vervea-cluster \
+                  --name aks-ea-vervea-cluster \
+                  --overwrite-existing
+
+          - task: KubectlInstaller@0
+            displayName: 'Install kubectl'
+
+          - task: Kubernetes@1
+            displayName: 'Create Namespace'
+            inputs:
+              kubernetesServiceConnection: 'aks-connection'  # Update with your K8s connection name
+              command: 'apply'
+              arguments: '-f k8s/namespace.yaml'
+
+          - task: Kubernetes@1
+            displayName: 'Deploy ConfigMap'
+            inputs:
+              kubernetesServiceConnection: 'aks-connection'
+              command: 'apply'
+              arguments: '-f k8s/configmap.yaml'
+
+          - task: Kubernetes@1
+            displayName: 'Deploy Service'
+            inputs:
+              kubernetesServiceConnection: 'aks-connection'
+              command: 'apply'
+              arguments: '-f k8s/service.yaml'
+
+          - task: KubernetesManifest@0
+            displayName: 'Deploy Application'
+            inputs:
+              kubernetesServiceConnection: 'aks-connection'
+              action: 'deploy'
+              kubernetesManifest: 'k8s/deployment.yaml'
+              containers: |
+                $(containerRegistry)/$(imageRepository):$(tag)
+
+          - task: Kubernetes@1
+            displayName: 'Verify Deployment'
+            inputs:
+              kubernetesServiceConnection: 'aks-connection'
+              command: 'rollout'
+              arguments: 'status deployment/kronos-app -n kronos'
+
+          - task: AzureCLI@2
+            displayName: 'Get Service Endpoint'
+            inputs:
+              azureSubscription: 'azure-subscription'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                echo "Waiting for LoadBalancer to get external IP..."
+                sleep 30
+                kubectl get svc kronos-app -n kronos
+                EXTERNAL_IP=$(kubectl get svc kronos-app -n kronos --template="{{ range (index .status.loadBalancer.ingress 0) }}{{ . }}{{ end }}")
+                echo "##vso[task.setvariable variable=AppEndpoint]$EXTERNAL_IP"
+                echo "Application deployed at: http://$EXTERNAL_IP"
+
